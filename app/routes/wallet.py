@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.dependencies import get_db
+from app.dependencies import get_db, get_current_user
 from app.schemas.wallet import (
     WalletBalanceResponse,
     WalletTransactionRequest,
@@ -9,52 +9,47 @@ from app.schemas.wallet import (
 )
 from app.services.wallet_service import wallet_service
 
+from app.models.user import User
+
 router = APIRouter(
     prefix="/wallet",
     tags=["Wallet"]
 )
 
 
-@router.get(
-    "/{user_id}/balance",
-    response_model=WalletBalanceResponse
-)
+@router.get("/balance")
 def get_balance(
-    user_id: int,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+
     return wallet_service.get_balance(
-        db,
-        user_id
+        db=db,
+        user_id=current_user.id
     )
 
-@router.post(
-    "/{user_id}/credit",
-    response_model=WalletTransactionResponse
-)
+@router.post("/credit")
 def credit_wallet(
-    user_id: int,
     transaction: WalletTransactionRequest,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
 
     return wallet_service.credit(
-        db,
-        user_id,
-        transaction
+        db=db,
+        user_id=current_user.id,
+        transaction=transaction
     )
 
-@router.post(
-    "/{user_id}/debit",
-    response_model=WalletTransactionResponse
-)
+@router.post("/debit")
 def debit_wallet(
-    user_id: int,
     transaction: WalletTransactionRequest,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+
     return wallet_service.debit(
-        db,
-        user_id,
-        transaction
+        db=db,
+        user_id=current_user.id,
+        transaction=transaction
     )

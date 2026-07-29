@@ -39,4 +39,16 @@ class UserRepository:
 
         return user
 
+    def get_by_id(
+        self,
+        db: Session,
+        user_id: int
+    ) -> User | None:
+
+        return (
+            db.query(User)
+            .filter(User.id == user_id)
+            .first()
+        )
+
 user_repository = UserRepository()  
