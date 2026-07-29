@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class WalletBalanceResponse(BaseModel):
@@ -10,3 +10,14 @@ class WalletBalanceResponse(BaseModel):
     model_config = {
         "from_attributes": True
     }
+
+class WalletTransactionRequest(BaseModel):
+    amount: Decimal = Field(
+        gt=0,
+        decimal_places=2
+    )
+
+
+class WalletTransactionResponse(BaseModel):
+    message: str
+    balance: Decimal

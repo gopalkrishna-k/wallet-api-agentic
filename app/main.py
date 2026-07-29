@@ -3,6 +3,8 @@ from fastapi import FastAPI
 from app.database import Base, engine
 from app.routes.users import router as user_router
 
+from app.routes.wallet import router as wallet_router
+
 import app.models
 
 app = FastAPI()
@@ -14,6 +16,8 @@ def startup():
 
 
 app.include_router(user_router)
+
+app.include_router(wallet_router)
 
 
 @app.get("/")
