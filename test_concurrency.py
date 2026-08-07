@@ -10,7 +10,7 @@ headers = {
 }
 
 payload = {
-    "amount": 10
+    "amount": 15
 }
 
 results = []
