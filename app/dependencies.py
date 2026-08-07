@@ -4,14 +4,15 @@ from app.database import SessionLocal
 
 from fastapi import Depends, HTTPException
 
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.repositories.user_repository import user_repository
 
 from app.security import verify_access_token
 
-oauth2_scheme = OAuth2PasswordBearer(
-    tokenUrl="/auth/login"
+bearer_scheme = HTTPBearer(
+    bearerFormat="JWT",
+    description="Paste your JWT access token here. Do not include the 'Bearer ' prefix."
 )
 
 def get_db():
@@ -25,12 +26,12 @@ def get_db():
 
 
 def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
     db: Session = Depends(get_db)
 ):
 
     payload = verify_access_token(
-        token
+        credentials.credentials
     )
 
     if payload is None:
