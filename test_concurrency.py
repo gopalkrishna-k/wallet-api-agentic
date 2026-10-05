@@ -3,7 +3,7 @@ import requests
 
 URL = "http://127.0.0.1:8000/wallet/debit"
 
-TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjozLCJ1c2VybmFtZSI6ImtvbWFsIiwiZXhwIjoxNzg2MTAwNzQ4fQ.4C7mKBYGa61-uOQaPCUVO_rhNKcltma0nJCy7rxkO4Q"
+TOKEN = "token"
 
 headers = {
     "Authorization": f"Bearer {TOKEN}"

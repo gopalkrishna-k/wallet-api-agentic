@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 
 from pydantic import BaseModel, Field
@@ -21,3 +22,15 @@ class WalletTransactionRequest(BaseModel):
 class WalletTransactionResponse(BaseModel):
     message: str
     balance: Decimal
+
+
+class LedgerEntryResponse(BaseModel):
+    id: int
+    transaction_type: str
+    amount: Decimal
+    balance_after: Decimal
+    created_at: datetime
+
+    model_config = {
+        "from_attributes": True
+    }

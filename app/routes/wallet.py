@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.dependencies import get_db, get_current_user
 from app.schemas.wallet import (
+    LedgerEntryResponse,
     WalletBalanceResponse,
     WalletTransactionRequest,
     WalletTransactionResponse,
@@ -24,6 +25,18 @@ def get_balance(
 ):
 
     return wallet_service.get_balance(
+        db=db,
+        user_id=current_user.id
+    )
+
+
+@router.get("/ledger", response_model=list[LedgerEntryResponse])
+def get_ledger(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+
+    return wallet_service.get_ledger(
         db=db,
         user_id=current_user.id
     )

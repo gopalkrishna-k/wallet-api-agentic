@@ -27,6 +27,28 @@ class WalletService:
 
         return wallet
 
+    def get_ledger(
+        self,
+        db: Session,
+        user_id: int
+    ):
+
+        wallet = wallet_repository.get_by_user_id(
+            db,
+            user_id
+        )
+
+        if wallet is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Wallet not found."
+            )
+
+        return ledger_repository.get_by_wallet_id(
+            db,
+            wallet.id
+        )
+
     def credit(
         self,
         db: Session,

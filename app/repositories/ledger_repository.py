@@ -27,5 +27,18 @@ class LedgerRepository:
 
         return ledger
 
+    def get_by_wallet_id(
+        self,
+        db: Session,
+        wallet_id: int
+    ) -> list[Ledger]:
+
+        return (
+            db.query(Ledger)
+            .filter(Ledger.wallet_id == wallet_id)
+            .order_by(Ledger.created_at.desc(), Ledger.id.desc())
+            .all()
+        )
+
 
 ledger_repository = LedgerRepository()
