@@ -1,8 +1,12 @@
 import sys
 import asyncio
+import threading
 
 if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except AttributeError:
+        pass  # removed in Python 3.16+
 
 import os
 from dotenv import load_dotenv
@@ -12,7 +16,9 @@ load_dotenv()
 import httpx
 import streamlit as st
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
-from agent.graph import compile_graph, create_checkpointer
+from psycopg_pool import AsyncConnectionPool
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from agent.graph import compile_graph, get_db_conn_string
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
@@ -23,17 +29,61 @@ st.set_page_config(
 )
 
 
-# Helper function to run async coroutines safely in Streamlit
-def run_async(coro):
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+# ---------------------------------------------------------------------------
+# Persistent async infrastructure — created ONCE per Streamlit server process
+# ---------------------------------------------------------------------------
+
+@st.cache_resource
+def _get_persistent_loop() -> asyncio.AbstractEventLoop:
+    """Single event loop in a daemon background thread shared across all reruns."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    return loop
 
 
+def run_async(coro, timeout: int = 120):
+    """Submit a coroutine to the persistent background loop and block until done."""
+    loop = _get_persistent_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=timeout)
+
+
+@st.cache_resource
+def _get_graph():
+    """
+    Open a proper AsyncConnectionPool and compile the LangGraph graph exactly once.
+    The pool stays open for the lifetime of the Streamlit server process.
+    """
+    loop = _get_persistent_loop()
+
+    async def _setup():
+        conn_str = get_db_conn_string()
+        # Use a connection pool so connections are reused across operations
+        pool = AsyncConnectionPool(
+            conn_str,
+            open=False,
+            min_size=1,
+            max_size=5,
+            kwargs={"autocommit": True, "prepare_threshold": 0},
+        )
+        await pool.open()
+        checkpointer = AsyncPostgresSaver(pool)
+        await checkpointer.setup()
+        return checkpointer
+
+    future = asyncio.run_coroutine_threadsafe(_setup(), loop)
+    checkpointer = future.result(timeout=30)
+    return compile_graph(checkpointer)
+
+
+# Warm up the persistent loop on first load
+_get_persistent_loop()
+
+
+# ---------------------------------------------------------------------------
 # Session State Initialization
+# ---------------------------------------------------------------------------
 if "jwt_token" not in st.session_state:
     st.session_state["jwt_token"] = None
 if "username" not in st.session_state:
@@ -42,7 +92,9 @@ if "user_id" not in st.session_state:
     st.session_state["user_id"] = None
 
 
-# --- AUTHENTICATION SCREEN ---
+# ---------------------------------------------------------------------------
+# AUTHENTICATION SCREEN
+# ---------------------------------------------------------------------------
 if not st.session_state["jwt_token"]:
     st.title("💳 Wallet API Agent - Login")
     st.caption("Secure Agentic Financial Assistant powered by FastAPI, MCP & LangGraph")
@@ -61,7 +113,7 @@ if not st.session_state["jwt_token"]:
                     res = httpx.post(
                         f"{API_BASE_URL}/auth/login",
                         json={"username": login_user, "password": login_pass},
-                        timeout=10.0
+                        timeout=10.0,
                     )
                     if res.status_code == 200:
                         data = res.json()
@@ -73,8 +125,11 @@ if not st.session_state["jwt_token"]:
                     else:
                         detail = res.json().get("detail", "Login failed")
                         st.error(f"Login failed: {detail}")
-                except Exception as e:
-                    st.error(f"Could not connect to backend server at {API_BASE_URL}. Ensure uvicorn is running.")
+                except Exception:
+                    st.error(
+                        f"Could not connect to backend server at {API_BASE_URL}. "
+                        "Ensure uvicorn is running."
+                    )
 
     with tab2:
         st.subheader("Create New Account")
@@ -89,7 +144,7 @@ if not st.session_state["jwt_token"]:
                     res = httpx.post(
                         f"{API_BASE_URL}/auth/register",
                         json={"username": reg_user, "email": reg_email, "password": reg_pass},
-                        timeout=10.0
+                        timeout=10.0,
                     )
                     if res.status_code == 201:
                         data = res.json()
@@ -101,19 +156,73 @@ if not st.session_state["jwt_token"]:
                     else:
                         detail = res.json().get("detail", "Registration failed")
                         st.error(f"Registration failed: {detail}")
-                except Exception as e:
-                    st.error(f"Could not connect to backend server at {API_BASE_URL}. Ensure uvicorn is running.")
+                except Exception:
+                    st.error(
+                        f"Could not connect to backend server at {API_BASE_URL}. "
+                        "Ensure uvicorn is running."
+                    )
 
     st.stop()
 
 
-# --- LOGGED IN USER INTERFACE ---
+# ---------------------------------------------------------------------------
+# LOGGED IN — Initialize graph from the main Streamlit thread.
+# This is the key: _get_graph() MUST be first called from outside a coroutine
+# so that asyncio.run_coroutine_threadsafe(...).result() doesn't deadlock the loop.
+# ---------------------------------------------------------------------------
 token = st.session_state["jwt_token"]
 username = st.session_state["username"]
 thread_id = f"thread_{username}"
 config = {"configurable": {"thread_id": thread_id}}
 
-# --- SIDEBAR DASHBOARD ---
+graph = _get_graph()   # safe here — main Streamlit thread, not inside a coroutine
+
+
+# ---------------------------------------------------------------------------
+# Async graph helpers — use `graph` from the closure (already initialised above)
+# ---------------------------------------------------------------------------
+
+async def get_graph_state():
+    return await graph.aget_state(config)
+
+
+async def process_user_prompt(prompt: str):
+    input_state = {
+        "messages": [HumanMessage(content=prompt)],
+        "jwt_token": token,
+        "user_id": username,
+    }
+    async for _ in graph.astream(input_state, config=config):
+        pass
+
+
+async def resume_graph_approval():
+    async for _ in graph.astream(None, config=config):
+        pass
+
+
+async def reject_graph_approval():
+    state = await graph.aget_state(config)
+    if state.values.get("messages"):
+        last_msg = state.values["messages"][-1]
+        if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+            tc = last_msg.tool_calls[0]
+            rejection_msg = ToolMessage(
+                content=(
+                    f"User REJECTED the financial transaction '{tc['name']}' "
+                    f"of amount {tc['args'].get('amount')}."
+                ),
+                tool_call_id=tc["id"],
+                name=tc["name"],
+            )
+            await graph.aupdate_state(config, {"messages": [rejection_msg]}, as_node="tools")
+            async for _ in graph.astream(None, config=config):
+                pass
+
+
+# ---------------------------------------------------------------------------
+# SIDEBAR DASHBOARD
+# ---------------------------------------------------------------------------
 with st.sidebar:
     st.title(f"👤 {username}")
     if st.button("🚪 Log Out"):
@@ -125,7 +234,6 @@ with st.sidebar:
     st.divider()
     st.subheader("💰 Wallet Overview")
 
-    # Fetch live balance
     headers = {"Authorization": f"Bearer {token}"}
     try:
         bal_res = httpx.get(f"{API_BASE_URL}/wallet/balance", headers=headers, timeout=5.0)
@@ -137,7 +245,6 @@ with st.sidebar:
     except Exception:
         st.warning("Backend offline.")
 
-    # Ledger history expander
     with st.expander("📜 Transaction Ledger"):
         try:
             led_res = httpx.get(f"{API_BASE_URL}/wallet/ledger", headers=headers, timeout=5.0)
@@ -155,64 +262,16 @@ with st.sidebar:
             st.caption("Unable to load ledger.")
 
 
-# --- MAIN CHAT AREA ---
+# ---------------------------------------------------------------------------
+# MAIN CHAT AREA
+# ---------------------------------------------------------------------------
 st.title("💳 Wallet AI Assistant")
 st.caption("Ask questions about your balance, view ledger history, or make credits/debits.")
 
+# Load current graph state
+current_state = run_async(get_graph_state())
 
-# Graph execution helper functions
-async def get_graph_state():
-    checkpointer_cm = await create_checkpointer()
-    async with checkpointer_cm as cp:
-        graph = compile_graph(cp)
-        state = await graph.aget_state(config)
-        return graph, state
-
-
-async def process_user_prompt(prompt: str):
-    checkpointer_cm = await create_checkpointer()
-    async with checkpointer_cm as cp:
-        graph = compile_graph(cp)
-        input_state = {
-            "messages": [HumanMessage(content=prompt)],
-            "jwt_token": token,
-            "user_id": username
-        }
-        async for _ in graph.astream(input_state, config=config):
-            pass
-
-
-async def resume_graph_approval():
-    checkpointer_cm = await create_checkpointer()
-    async with checkpointer_cm as cp:
-        graph = compile_graph(cp)
-        async for _ in graph.astream(None, config=config):
-            pass
-
-
-async def reject_graph_approval():
-    checkpointer_cm = await create_checkpointer()
-    async with checkpointer_cm as cp:
-        graph = compile_graph(cp)
-        state = await graph.aget_state(config)
-        if state.values.get("messages"):
-            last_msg = state.values["messages"][-1]
-            if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-                tc = last_msg.tool_calls[0]
-                rejection_msg = ToolMessage(
-                    content=f"User REJECTED the financial transaction '{tc['name']}' of amount {tc['args'].get('amount')}.",
-                    tool_call_id=tc['id'],
-                    name=tc['name']
-                )
-                await graph.aupdate_state(config, {"messages": [rejection_msg]}, as_node="tools")
-                async for _ in graph.astream(None, config=config):
-                    pass
-
-
-# Load graph state
-graph, current_state = run_async(get_graph_state())
-
-# Render message history
+# Render conversation history
 messages = current_state.values.get("messages", [])
 for msg in messages:
     if isinstance(msg, HumanMessage):
@@ -233,8 +292,10 @@ for msg in messages:
                     st.write(text_content)
 
 
-# Check for Human-In-The-Loop (HITL) Interruption
-is_interrupted = current_state.next == ("tools",)
+# ---------------------------------------------------------------------------
+# HITL Interruption — only for credit_wallet / debit_wallet
+# ---------------------------------------------------------------------------
+is_interrupted = current_state.next == ("financial_tools",)
 pending_tool_call = None
 
 if is_interrupted and messages:
@@ -242,7 +303,6 @@ if is_interrupted and messages:
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
         pending_tool_call = last_msg.tool_calls[0]
 
-# If interrupted at financial operation, show HITL Approval Card
 if is_interrupted and pending_tool_call:
     tool_name = pending_tool_call.get("name")
     tool_args = pending_tool_call.get("args", {})
@@ -268,7 +328,9 @@ if is_interrupted and pending_tool_call:
             st.rerun()
 
 
-# Chat input for user
+# ---------------------------------------------------------------------------
+# Chat Input
+# ---------------------------------------------------------------------------
 user_input = st.chat_input("Ask your wallet assistant...", disabled=is_interrupted)
 if user_input:
     with st.chat_message("user"):
